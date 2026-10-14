@@ -1,7 +1,7 @@
 -- =====================================================================
 -- EcoRoute Nairobi - Oracle APEX / Autonomous 23ai backend
 -- Run in SQL Workshop > SQL Scripts (or SQL Developer Web) in order.
-
+-- NOT yet executed against a live database: test section by section.
 -- =====================================================================
 
 -- ---------------------------------------------------------------
@@ -106,6 +106,7 @@ END eco_route_pkg;
 CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
 
   TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
+  TYPE t_s IS TABLE OF NUMBER INDEX BY VARCHAR2(20);
 
   -- ASSUMPTION: load adds up to +50% fuel use at full capacity; congestion
   -- adds 25% per extra unit of congestion_factor. Replace with factors from
@@ -133,14 +134,14 @@ CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
                   o_co2      OUT NUMBER,
                   o_geom     OUT SDO_GEOMETRY,
                   o_found    OUT BOOLEAN) IS
-    l_dist  t_n;  l_pnode t_n;  l_pedge t_n;  l_done t_n;  l_path t_n;
-    u PLS_INTEGER;  k PLS_INTEGER;  v PLS_INTEGER;
+    l_dist  t_s;  l_pnode t_s;  l_pedge t_s;  l_done t_s;  l_path t_n;
+    u VARCHAR2(20);  k VARCHAR2(20);  v NUMBER;
     best NUMBER;  c NUMBER;  cnt PLS_INTEGER := 0;
     l_len NUMBER; l_spd NUMBER; l_cong NUMBER; l_lon NUMBER; l_lat NUMBER;
     l_ords SDO_ORDINATE_ARRAY := SDO_ORDINATE_ARRAY();
   BEGIN
     o_found := FALSE; o_dist_m := 0; o_time_s := 0; o_co2 := 0;
-    l_dist(p_origin) := 0;
+    l_dist(TO_CHAR(p_origin)) := 0;
 
     LOOP
       -- pick the unvisited node with the smallest tentative cost
@@ -151,12 +152,12 @@ CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
         END IF;
         k := l_dist.NEXT(k);
       END LOOP;
-      EXIT WHEN u IS NULL OR u = p_dest;
+      EXIT WHEN u IS NULL OR u = TO_CHAR(p_dest);
       l_done(u) := 1;
 
       FOR e IN (SELECT edge_id, dst_node, length_m, speed_kph, congestion_factor
-                  FROM edges WHERE src_node = u) LOOP
-        IF NOT l_done.EXISTS(e.dst_node) THEN
+                  FROM edges WHERE src_node = TO_NUMBER(u)) LOOP
+        IF NOT l_done.EXISTS(TO_CHAR(e.dst_node)) THEN
           c := best + CASE p_mode
                         WHEN 'FASTEST' THEN
                           e.length_m / (e.speed_kph / 3.6) * e.congestion_factor
@@ -164,16 +165,16 @@ CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
                           edge_co2_kg(e.length_m, e.congestion_factor,
                                       p_base, p_payload, p_capacity)
                       END;
-          IF NOT l_dist.EXISTS(e.dst_node) OR c < l_dist(e.dst_node) THEN
-            l_dist(e.dst_node)  := c;
-            l_pnode(e.dst_node) := u;
-            l_pedge(e.dst_node) := e.edge_id;
+          IF NOT l_dist.EXISTS(TO_CHAR(e.dst_node)) OR c < l_dist(TO_CHAR(e.dst_node)) THEN
+            l_dist(TO_CHAR(e.dst_node))  := c;
+            l_pnode(TO_CHAR(e.dst_node)) := TO_NUMBER(u);
+            l_pedge(TO_CHAR(e.dst_node)) := e.edge_id;
           END IF;
         END IF;
       END LOOP;
     END LOOP;
 
-    IF u IS NULL OR u <> p_dest THEN
+    IF u IS NULL OR u <> TO_CHAR(p_dest) THEN
       RETURN;   -- destination unreachable
     END IF;
 
@@ -182,11 +183,11 @@ CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
     WHILE v <> p_origin LOOP
       SELECT length_m, speed_kph, congestion_factor
         INTO l_len, l_spd, l_cong
-        FROM edges WHERE edge_id = l_pedge(v);
+        FROM edges WHERE edge_id = l_pedge(TO_CHAR(v));
       o_dist_m := o_dist_m + l_len;
       o_time_s := o_time_s + l_len / (l_spd / 3.6) * l_cong;
       o_co2    := o_co2 + edge_co2_kg(l_len, l_cong, p_base, p_payload, p_capacity);
-      v := l_pnode(v);
+      v := l_pnode(TO_CHAR(v));
       cnt := cnt + 1; l_path(cnt) := v;
     END LOOP;
 
