@@ -1,7 +1,7 @@
 -- =====================================================================
 -- EcoRoute Nairobi - Oracle APEX / Autonomous 23ai backend
 -- Run in SQL Workshop > SQL Scripts (or SQL Developer Web) in order.
-
+-- NOT yet executed against a live database: test section by section.
 -- =====================================================================
 
 -- ---------------------------------------------------------------
