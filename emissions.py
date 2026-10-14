@@ -15,11 +15,24 @@ VEHICLES = {
     "truck": {"fuel": "diesel", "l_per_100km": 28, "capacity_t": 10.0},
 }
 
-# speed_factor and payload_factor below are simplified model assumptions,
-# not published emission curves.
-def speed_factor(v_kmh):
-    v = max(v_kmh, 5)
-    return 1 + 0.0004 * (v - 65) ** 2
+# Speed penalty on fuel consumption per km.
+# Bucket table adapted from Maria's ecoroute_emissions.py,
+# which is based on fleet-telematics-style fuel-vs-speed curves.
+# Best efficiency band is 30-60 km/h; low speeds and high speeds both burn more.
+SPEED_BUCKETS = [
+    (0,   10, 1.60),
+    (10,  20, 1.35),
+    (20,  30, 1.15),
+    (30,  60, 1.00),
+    (60,  80, 1.05),
+    (80, 999, 1.20),
+]
+
+def speed_factor(v):
+    for lo, hi, m in SPEED_BUCKETS:
+        if lo <= v < hi:
+            return m
+    return 1.0
 
 def payload_factor(load_t, capacity_t):
     return 1 + 0.25 * min(load_t / capacity_t, 1.0)
