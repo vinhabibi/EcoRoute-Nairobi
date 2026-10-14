@@ -26,4 +26,4 @@ for a, b in pairs:
 df = pd.DataFrame(rows)
 df.to_csv("results.csv", index=False)
 print(df.groupby("hour")[["save_vs_fastest_pct", "save_vs_shortest_pct", "eco_extra_min"]]
-        .agg(["mean", "min", "max"]).round(1))Get-ChildItem -Force -Name
+        .agg(["mean", "min", "max"]).round(1))

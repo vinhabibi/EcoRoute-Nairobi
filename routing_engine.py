@@ -1,14 +1,26 @@
 import networkx as nx
 import osmnx as ox
+import math
 from graph_builder import build_graph
 from emissions import edge_fuel_l, EF_KG_PER_L, VEHICLES
 
 CONGESTION = {
-    "peak":    {"motorway": .6, "trunk": .45, "primary": .4, "secondary": .45, "default": .6},
-    "offpeak": {"motorway": .9, "trunk": .8, "primary": .75, "secondary": .8, "default": .9},
+    "peak":    {"motorway": .85, "motorway_link": .70, "trunk": .38, "trunk_link": .60,
+                "primary": .45, "secondary": .70, "tertiary": .60, "default": .65},
+    "offpeak": {"motorway": .95, "motorway_link": .80, "trunk": .40, "trunk_link": .70,
+                "primary": .55, "secondary": .80, "tertiary": .70, "default": .75},
 }
 PEAK_HOURS = {7, 8, 9, 16, 17, 18, 19}
 
+# CBD congestion zone: extra slowdown for edges within ZONE_KM of the CBD
+CBD_LAT, CBD_LON = -1.2864, 36.8172
+ZONE_KM = 3.0
+ZONE_FACTOR = {"peak": 0.65, "offpeak": 0.70}
+
+def _in_zone(G, u):
+    dy = (G.nodes[u]["y"] - CBD_LAT) * 111.0
+    dx = (G.nodes[u]["x"] - CBD_LON) * 111.0 * math.cos(math.radians(CBD_LAT))
+    return (dx * dx + dy * dy) ** 0.5 <= ZONE_KM
 _G = None
 def get_graph():
     global _G
@@ -21,10 +33,13 @@ def _hwy(d):
     return h[0] if isinstance(h, list) else h
 
 def annotate(G, vehicle, load_t, hour):
-    prof = CONGESTION["peak" if hour in PEAK_HOURS else "offpeak"]
+    period = "peak" if hour in PEAK_HOURS else "offpeak"
+    prof = CONGESTION[period]
     fuel_type = VEHICLES[vehicle]["fuel"]
     for u, v, k, d in G.edges(keys=True, data=True):
         eff = float(d["speed_kph"]) * prof.get(_hwy(d), prof["default"])
+        if _in_zone(G, u):
+            eff *= ZONE_FACTOR[period]
         length = float(d["length"])
         d["time_s"] = length / (eff / 3.6)
         d["fuel_l"] = edge_fuel_l(length, eff, vehicle, load_t)
