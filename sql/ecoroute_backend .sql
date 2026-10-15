@@ -1,7 +1,8 @@
 -- =====================================================================
 -- EcoRoute Nairobi - Oracle APEX / Autonomous 23ai backend
 -- Run in SQL Workshop > SQL Scripts (or SQL Developer Web) in order.
--- NOT yet executed against a live database: test section by section.
+-- Then load data/nodes.csv into NODES and data/edges.csv into EDGES (APEX Data Workshop > Data Load,
+-- Existing Table, Append), nodes first, then run the final section of this script.
 -- =====================================================================
 
 -- ---------------------------------------------------------------
@@ -46,7 +47,7 @@ CREATE TABLE delivery_jobs (
 CREATE TABLE route_results (
   result_id    NUMBER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   job_id       NUMBER NOT NULL REFERENCES delivery_jobs(job_id),
-  route_type   VARCHAR2(10) NOT NULL CHECK (route_type IN ('FASTEST','ECO')),
+  route_type   VARCHAR2(10) NOT NULL CHECK (route_type IN ('FASTEST','ECO','SHORTEST')),
   distance_km  NUMBER,
   time_min     NUMBER,
   co2_kg       NUMBER,
@@ -89,9 +90,8 @@ CREATE PROPERTY GRAPH nairobi_road_graph
 --   COLUMNS (e.edge_id, e.name, b.node_id AS to_node));
 
 -- ---------------------------------------------------------------
--- 3. EMISSION MODEL + WEIGHTED ROUTING (PL/SQL Dijkstra)
---    SQL/PGQ shortest path counts hops, not weights, so weighted
---    fastest/eco routing is done in PL/SQL over the same tables.
+-- 3. EMISSION MODEL + WEIGHTED ROUTING (PL/SQL Dijkstra), modes FASTEST / SHORTEST / ECO
+--    SQL/PGQ shortest path counts hops, not weights, so weighted routing is done in PL/SQL.
 -- ---------------------------------------------------------------
 CREATE OR REPLACE PACKAGE eco_route_pkg AS
   FUNCTION edge_co2_kg(p_length_m   NUMBER,
@@ -108,9 +108,9 @@ CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
   TYPE t_n IS TABLE OF NUMBER INDEX BY PLS_INTEGER;
   TYPE t_s IS TABLE OF NUMBER INDEX BY VARCHAR2(20);
 
-  -- ASSUMPTION: load adds up to +50% fuel use at full capacity; congestion
-  -- adds 25% per extra unit of congestion_factor. Replace with factors from
-  -- your cited source (e.g. GLEC / DEFRA) and tune.
+  -- Payload factor: +25% at full load. Matches emissions.py payload_factor.
+  -- Original +50% was too aggressive; aligned with the Python engine on 2026-10-14.
+  -- Congestion adds 25% per extra unit of congestion_factor.
   FUNCTION edge_co2_kg(p_length_m   NUMBER,
                        p_congestion NUMBER,
                        p_base       NUMBER,
@@ -119,13 +119,13 @@ CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
   BEGIN
     RETURN (p_length_m / 1000)
          * p_base
-         * (1 + 0.5  * NVL(LEAST(p_payload / NULLIF(p_capacity, 0), 1), 0))
+         * (1 + 0.25 * NVL(LEAST(p_payload / NULLIF(p_capacity, 0), 1), 0))
          * (1 + 0.25 * (GREATEST(p_congestion, 1) - 1));
   END edge_co2_kg;
 
   PROCEDURE route(p_origin   NUMBER,
                   p_dest     NUMBER,
-                  p_mode     VARCHAR2,          -- 'FASTEST' | 'ECO'
+                  p_mode     VARCHAR2,          -- 'FASTEST' | 'SHORTEST' | 'ECO'
                   p_base     NUMBER,
                   p_payload  NUMBER,
                   p_capacity NUMBER,
@@ -159,8 +159,9 @@ CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
                   FROM edges WHERE src_node = TO_NUMBER(u)) LOOP
         IF NOT l_done.EXISTS(TO_CHAR(e.dst_node)) THEN
           c := best + CASE p_mode
-                        WHEN 'FASTEST' THEN
+                        WHEN 'FASTEST'  THEN
                           e.length_m / (e.speed_kph / 3.6) * e.congestion_factor
+                        WHEN 'SHORTEST' THEN e.length_m
                         ELSE
                           edge_co2_kg(e.length_m, e.congestion_factor,
                                       p_base, p_payload, p_capacity)
@@ -216,7 +217,9 @@ CREATE OR REPLACE PACKAGE BODY eco_route_pkg AS
 
     DELETE FROM route_results WHERE job_id = p_job_id;
 
-    FOR m IN (SELECT 'FASTEST' AS route_mode FROM dual UNION ALL SELECT 'ECO' FROM dual) LOOP
+    FOR m IN (SELECT 'FASTEST'  AS route_mode FROM dual UNION ALL
+              SELECT 'SHORTEST' FROM dual UNION ALL
+              SELECT 'ECO'      FROM dual) LOOP
       route(l_job.origin_node, l_job.dest_node, m.route_mode,
             l_veh.base_kg_co2_per_km, l_job.payload_kg, l_veh.capacity_kg,
             l_dist, l_time, l_co2, l_geom, l_found);
@@ -233,7 +236,7 @@ END eco_route_pkg;
 /
 
 -- ---------------------------------------------------------------
--- 4. DASHBOARD VIEW: fastest vs eco per job
+-- 4. DASHBOARD VIEW: fastest vs eco (and shortest) per job
 -- ---------------------------------------------------------------
 CREATE OR REPLACE VIEW v_job_comparison AS
 SELECT j.job_id,
@@ -243,49 +246,30 @@ SELECT j.job_id,
        e.distance_km AS eco_km,      e.time_min AS eco_min,      e.co2_kg AS eco_co2,
        f.co2_kg - e.co2_kg AS co2_saved_kg,
        ROUND(100 * (f.co2_kg - e.co2_kg) / NULLIF(f.co2_kg, 0), 1) AS co2_saved_pct,
-       e.time_min - f.time_min AS extra_minutes
+       e.time_min - f.time_min AS extra_minutes,
+       s.distance_km AS shortest_km, s.time_min AS shortest_min, s.co2_kg AS shortest_co2
   FROM delivery_jobs j
   JOIN vehicles v       ON v.vehicle_id = j.vehicle_id
   JOIN route_results f  ON f.job_id = j.job_id AND f.route_type = 'FASTEST'
-  JOIN route_results e  ON e.job_id = j.job_id AND e.route_type = 'ECO';
+  JOIN route_results e  ON e.job_id = j.job_id AND e.route_type = 'ECO'
+  LEFT JOIN route_results s ON s.job_id = j.job_id AND s.route_type = 'SHORTEST';
+
 
 -- ---------------------------------------------------------------
--- 5. SAMPLE DATA - tiny test graph where FASTEST and ECO differ
---    Path A: 1 -> 2 -> 4  (6 km, 30 kph)  shorter, slower  => ECO
---    Path B: 1 -> 3 -> 4  (8 km, 80 kph)  longer, faster   => FASTEST
+-- 5. VEHICLES (kg CO2 per km, empty load). VERIFY against GLEC / DEFRA and cite the source.
 -- ---------------------------------------------------------------
--- Node 1 is the CBD, node 4 is the Industrial Area side.
--- (No comments after a semicolon: the APEX script runner merges those lines.)
-INSERT INTO nodes VALUES (1, -1.2864, 36.8172);
-INSERT INTO nodes VALUES (2, -1.2750, 36.8350);
-INSERT INTO nodes VALUES (3, -1.3050, 36.8450);
-INSERT INTO nodes VALUES (4, -1.2921, 36.8600);
-
-INSERT INTO edges VALUES (1, 1, 2, 'Local road A1', 'secondary', 3000, 30, 1);
-INSERT INTO edges VALUES (2, 2, 4, 'Local road A2', 'secondary', 3000, 30, 1);
-INSERT INTO edges VALUES (3, 1, 3, 'Highway B1',    'trunk',     4000, 80, 1);
-INSERT INTO edges VALUES (4, 3, 4, 'Highway B2',    'trunk',     4000, 80, 1);
-
--- PLACEHOLDER emission factors: replace with sourced values
-INSERT INTO vehicles (vehicle_type, fuel_type, capacity_kg, base_kg_co2_per_km)
-VALUES ('Delivery van',  'Diesel', 1000, 0.25);
-INSERT INTO vehicles (vehicle_type, fuel_type, capacity_kg, base_kg_co2_per_km)
-VALUES ('Light truck',   'Diesel', 3000, 0.45);
-INSERT INTO vehicles (vehicle_type, fuel_type, capacity_kg, base_kg_co2_per_km)
-VALUES ('Medium truck',  'Diesel', 8000, 0.75);
-
-INSERT INTO delivery_jobs (vehicle_id, origin_node, dest_node, payload_kg)
-SELECT vehicle_id, 1, 4, 1500 FROM vehicles WHERE vehicle_type = 'Light truck';
+INSERT INTO vehicles (vehicle_type, fuel_type, capacity_kg, base_kg_co2_per_km) VALUES ('Delivery van',  'Diesel', 1000, 0.2948);
+INSERT INTO vehicles (vehicle_type, fuel_type, capacity_kg, base_kg_co2_per_km) VALUES ('Light truck',   'Diesel', 3000, 0.7504);
+INSERT INTO vehicles (vehicle_type, fuel_type, capacity_kg, base_kg_co2_per_km) VALUES ('Medium truck',  'Diesel', 8000, 1.0000);
 COMMIT;
 
--- Compute both routes for the sample job
-DECLARE
-  l_job NUMBER;
-BEGIN
-  SELECT MAX(job_id) INTO l_job FROM delivery_jobs;
-  eco_route_pkg.compute_job(l_job);
-END;
-/
-
--- Then check it in SQL Commands:
+-- ---------------------------------------------------------------
+-- 6. DEMO JOB: run AFTER nodes.csv and edges.csv are loaded
+--    CBD (260573357) to Westlands (30402257), Light truck, 1500 kg
+-- ---------------------------------------------------------------
+-- INSERT INTO delivery_jobs (vehicle_id, origin_node, dest_node, payload_kg)
+-- SELECT vehicle_id, 260573357, 30402257, 1500 FROM vehicles WHERE vehicle_type = 'Light truck';
+-- COMMIT;
+-- DECLARE l_job NUMBER; BEGIN SELECT MAX(job_id) INTO l_job FROM delivery_jobs; eco_route_pkg.compute_job(l_job); END;
+-- /
 -- SELECT * FROM v_job_comparison;
