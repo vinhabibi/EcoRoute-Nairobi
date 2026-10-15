@@ -32,10 +32,10 @@ GRADIENT = {  # ASSUMPTION, same as section B of ecoroute_dashboard.sql
 # ------------------------------------------------------------------ data
 def read_csv(name: str, upload):
     if upload is not None:
-        return pd.read_csv(upload)
+        return pd.read_csv(upload).rename(columns=str.lower)
     for base in (Path(__file__).parent / "data", Path("data"), Path(".")):
         if (base / name).exists():
-            return pd.read_csv(base / name)
+            return pd.read_csv(base / name).rename(columns=str.lower)  # Oracle exports are UPPERCASE
     return None
 
 
@@ -107,7 +107,8 @@ def simulate(_g_fast, _g_eco, n, seed, key):
         v = VEHICLES.iloc[rng.randrange(len(VEHICLES))]
         payload = round(v.capacity_kg * rng.uniform(0.2, 1.0))
         load = min(payload / v.capacity_kg, 1)
-        pf, pe = nx.shortest_path(_g_fast, o, d, "w"), nx.shortest_path(_g_eco, o, d, "w")
+        pf = nx.bidirectional_dijkstra(_g_fast, o, d, "w")[1]  # much faster than plain Dijkstra on 47k nodes
+        pe = nx.bidirectional_dijkstra(_g_eco, o, d, "w")[1]
         f_km, f_min, f_F = totals(_g_fast, pf)
         e_km, e_min, e_F = totals(_g_eco, pe)
         scale = v.base_kg_co2_per_km * (1 + 0.5 * load)
@@ -204,7 +205,11 @@ with tab_route:
 
 # ------------------------------------------------------------------ network
 with tab_net:
-    e = edges.join(coords.add_prefix("s_"), on="src_node").join(coords.add_prefix("d_"), on="dst_node")
+    minor = ["residential", "unclassified", "living_street"]
+    show_minor = st.checkbox("Include minor roads (residential, unclassified)", value=False,
+                             help="Drawing all ~113k segments can make the map slow.")
+    e = edges if show_minor else edges[~edges.road_class.isin(minor)]
+    e = e.join(coords.add_prefix("s_"), on="src_node").join(coords.add_prefix("d_"), on="dst_node")
     e["colour"] = e.road_class.str.replace("_link", "", regex=False).map(CLASS_COLOURS).apply(
         lambda c: c if isinstance(c, list) else [120, 120, 120])
     st.pydeck_chart(pdk.Deck(
@@ -212,6 +217,6 @@ with tab_net:
                           get_target_position="[d_lon, d_lat]", get_color="colour", width_min_pixels=2)],
         initial_view_state=pdk.ViewState(longitude=float(nodes.lon.mean()), latitude=float(nodes.lat.mean()), zoom=11.5),
         height=560))
-    st.caption(f"{len(nodes):,} nodes, {len(edges):,} edges. Darker red = bigger roads.")
+    st.caption(f"{len(nodes):,} nodes, {len(edges):,} edges ({len(e):,} drawn). Darker red = bigger roads.")
     rc = edges.groupby("road_class", as_index=False).agg(edges=("edge_id", "count"), km=("length_m", lambda s: s.sum() / 1000))
     st.dataframe(rc.round(1), hide_index=True)
