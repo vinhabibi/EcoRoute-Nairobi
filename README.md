@@ -5,6 +5,7 @@
 Built on Oracle Autonomous Database and Oracle APEX for the Green Tech Hackathon 2026, Sustainable Transport and Logistics Systems track.
 
 - **Live app:** (https://ecoroute-6jaqemeqkgkkt6rkjzskuv.streamlit.app/)
+- **APEX app:** (https://g24f8d8a06979fc-ecoroutedb.adb.uk-london-1.oraclecloudapps.com/ords/r/ecoroute/ecoroute-nairobi/home?session=307622000434937)
 - **Team:** Root Access, Jomo Kenyatta University of Agriculture and Technology (JKUAT)
 - **Track:** Sustainable Transport and Logistics Systems
 
