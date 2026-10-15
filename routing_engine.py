@@ -1,0 +1,75 @@
+import networkx as nx
+import osmnx as ox
+import math
+from graph_builder import build_graph
+from emissions import edge_fuel_l, EF_KG_PER_L, VEHICLES
+
+CONGESTION = {
+    "peak":    {"motorway": .85, "motorway_link": .70, "trunk": .38, "trunk_link": .60,
+                "primary": .45, "secondary": .70, "tertiary": .60, "default": .65},
+    "offpeak": {"motorway": .95, "motorway_link": .80, "trunk": .40, "trunk_link": .70,
+                "primary": .55, "secondary": .80, "tertiary": .70, "default": .75},
+}
+PEAK_HOURS = {7, 8, 9, 16, 17, 18, 19}
+
+# CBD congestion zone: extra slowdown for edges within ZONE_KM of the CBD
+CBD_LAT, CBD_LON = -1.2864, 36.8172
+ZONE_KM = 3.0
+ZONE_FACTOR = {"peak": 0.65, "offpeak": 0.70}
+
+def _in_zone(G, u):
+    dy = (G.nodes[u]["y"] - CBD_LAT) * 111.0
+    dx = (G.nodes[u]["x"] - CBD_LON) * 111.0 * math.cos(math.radians(CBD_LAT))
+    return (dx * dx + dy * dy) ** 0.5 <= ZONE_KM
+_G = None
+def get_graph():
+    global _G
+    if _G is None:
+        _G = build_graph()
+    return _G
+
+def _hwy(d):
+    h = d.get("highway", "default")
+    return h[0] if isinstance(h, list) else h
+
+def annotate(G, vehicle, load_t, hour):
+    period = "peak" if hour in PEAK_HOURS else "offpeak"
+    prof = CONGESTION[period]
+    fuel_type = VEHICLES[vehicle]["fuel"]
+    for u, v, k, d in G.edges(keys=True, data=True):
+        eff = float(d["speed_kph"]) * prof.get(_hwy(d), prof["default"])
+        if _in_zone(G, u):
+            eff *= ZONE_FACTOR[period]
+        length = float(d["length"])
+        d["time_s"] = length / (eff / 3.6)
+        d["fuel_l"] = edge_fuel_l(length, eff, vehicle, load_t)
+        d["co2_kg"] = d["fuel_l"] * EF_KG_PER_L[fuel_type]
+    return G
+
+def _totals(G, path, weight):
+    out = dict(distance_km=0.0, time_min=0.0, fuel_l=0.0, co2_kg=0.0)
+    for u, v in zip(path[:-1], path[1:]):
+        d = min(G[u][v].values(), key=lambda e: e[weight])
+        out["distance_km"] += d["length"] / 1000
+        out["time_min"] += d["time_s"] / 60
+        out["fuel_l"] += d["fuel_l"]
+        out["co2_kg"] += d["co2_kg"]
+    return {k: round(val, 2) for k, val in out.items()}
+
+def compare_routes(origin, dest, vehicle="van", load_t=0.5, hour=8):
+    G = annotate(get_graph(), vehicle, load_t, hour)
+    o = ox.distance.nearest_nodes(G, origin[1], origin[0])  # X = lon, Y = lat
+    t = ox.distance.nearest_nodes(G, dest[1], dest[0])
+    modes = {"shortest": "length", "fastest": "time_s", "eco": "co2_kg"}
+    res = {}
+    for name, w in modes.items():
+        path = nx.shortest_path(G, o, t, weight=w)
+        res[name] = {"coords": [(G.nodes[n]["y"], G.nodes[n]["x"]) for n in path],
+                     **_totals(G, path, w)}
+    def pct(base, new):
+        return round(100 * (base - new) / base, 1) if base else 0.0
+    res["savings"] = {
+        "co2_vs_fastest_pct": pct(res["fastest"]["co2_kg"], res["eco"]["co2_kg"]),
+        "co2_vs_shortest_pct": pct(res["shortest"]["co2_kg"], res["eco"]["co2_kg"]),
+    }
+    return res

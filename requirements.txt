@@ -1,5 +1,0 @@
-streamlit>=1.50
-networkx
-pandas
-pydeck
-altair
